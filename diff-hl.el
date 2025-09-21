@@ -96,6 +96,27 @@
   "Face used to highlight changed lines."
   :group 'diff-hl)
 
+;; TODO: probably, error during revert
+(defface diff-hl-staged-insert
+    '((default :background "#e7e0da"))
+  ;; '((default :inherit diff-function))
+  "Face for staged lines."
+  :group 'diff-hl)
+
+;; TODO: probably, error during revert
+(defface diff-hl-staged-delete
+    '((default :background "#caeafa"))
+  ;; '((default :inherit ediff-current-diff-Ancestor))
+  "Face for staged lines."
+  :group 'diff-hl)
+
+;; TODO: error during revert
+(defface diff-hl-staged-change
+    '((default :background "#bd30aa"))
+  ;; '((default :inherit hi-pink))
+  "Face for staged lines."
+  :group 'diff-hl)
+
 (defface diff-hl-reference-insert
   '((default :inherit diff-hl-insert))
   "Face used to highlight lines inserted since reference rev."
@@ -232,13 +253,16 @@ performance when viewing such files in certain conditions."
                       (repeat :inline t (symbol :tag "mode"))))
   :group 'diff-hl)
 
-(defcustom diff-hl-show-staged-changes t
+(defcustom diff-hl-show-staged-changes 'distinct
   "Whether to include staged changes in the indicators.
 Only affects Git, it's the only backend that has staging area.
 
 When `diff-hl-highlight-reference-function' is non-nil, instead of being
 hidden, the staged changes become part of the \"reference\" indicators."
-  :type 'boolean)
+  :type '(choice
+          (const :tag "Include staged changes" t)
+          (const :tag "Hide staged changes" nil)
+          (const :tag "Color staged changes distinctly" distinct)))
 
 (defcustom diff-hl-goto-hunk-old-revisions nil
   "When non-nil, `diff-hl-diff-goto-hunk' will always try to
@@ -405,7 +429,7 @@ It can be a relative expression as well, such as \"HEAD^\" with Git, or
   (cond
    ((and (not new-rev)
          (not diff-hl-reference-revision)
-         (not diff-hl-show-staged-changes)
+         (not (eq t diff-hl-show-staged-changes))
          (eq backend 'Git))
     (apply #'vc-git-command buffer
            (if (diff-hl--use-async-p) 'async 1)
@@ -469,9 +493,22 @@ It can be a relative expression as well, such as \"HEAD^\" with Git, or
                                                                  'git-index
                                                                (diff-hl-head-revision backend))))))
                  (diff-hl-reference-revision nil)
+                 (staged-changes (and (eq 'distinct diff-hl-show-staged-changes)
+                                      (diff-hl-changes-from-buffer
+                                       (diff-hl-changes-buffer file backend 'git-index))))
                  (work-changes (diff-hl-changes-from-buffer
                                 (diff-hl-changes-buffer file backend))))
             `((:reference . ,(diff-hl-adjust-changes ref-changes work-changes))
+              ;; TODO: any adjust, as done for `:reference'?
+              (:staged . ,(mapcar (lambda (sublist)
+                                    (append (butlast sublist)
+                                            (list (pcase (car (last sublist))
+                                                    ('insert 'staged-insert)
+                                                    ('delete 'staged-delete)
+                                                    ('change 'staged-change)))))
+                                  staged-changes))
+              ;; TODO: any adjust against `staged-changes', as done for
+              ;; `:reference'?
               (:working . ,work-changes))))
          ((eq state 'added)
           `((:working . ((1 ,(line-number-at-pos (point-max)) 0 insert)))))
@@ -635,7 +672,7 @@ Return a list of line overlays used."
             (forward-line (- line current-line))
             (setq current-line line)
             (let ((hunk-beg (point))
-                  (len (if (eq type 'delete) 1 inserts)))
+                  (len (if (memq type '(delete staged-delete)) 1 inserts)))
               (while (and reuse
                           (< (overlay-start (car reuse)) (point)))
                 (setq reuse (cdr reuse)))
@@ -670,6 +707,7 @@ Return a list of line overlays used."
   (let* ((cc (diff-hl-changes))
          (ref-changes (assoc-default :reference cc))
          (changes (assoc-default :working cc))
+         (staged-changes (assoc-default :staged cc))
          reuse)
     (diff-hl-remove-overlays)
     (let ((diff-hl-highlight-function
@@ -677,6 +715,8 @@ Return a list of line overlays used."
           (diff-hl-fringe-face-function
            diff-hl-fringe-reference-face-function))
       (setq reuse (diff-hl--update-overlays ref-changes nil)))
+    ;; TODO: reuse?
+    (diff-hl--update-overlays staged-changes nil)
     (diff-hl--update-overlays changes reuse)
     (when (not (or changes ref-changes))
       (diff-hl--autohide-margin))))
@@ -1102,11 +1142,11 @@ Only supported with Git."
         (insert (format "+++ b/%s\n" file-base)))
       (setq success (diff-hl-stage-diff orig-buffer)))
     (when success
-      (if diff-hl-show-staged-changes
+      (if (eq t diff-hl-show-staged-changes)
           (message (concat "Hunk staged; customize `diff-hl-show-staged-changes'"
                            " to highlight only unstaged changes"))
         (message "Hunk staged"))
-      (unless diff-hl-show-staged-changes
+      (when (not (eq t diff-hl-show-staged-changes))
         (diff-hl-update)))))
 
 (defun diff-hl-unstage-file ()
@@ -1119,7 +1159,7 @@ Only supported with Git."
   (diff-hl--ensure-staging-supported)
   (vc-git-command nil 0 buffer-file-name "reset")
   (message "Unstaged all")
-  (unless diff-hl-show-staged-changes
+  (when (not (eq t diff-hl-show-staged-changes))
     (diff-hl-update)))
 
 (defun diff-hl-stage-dwim (&optional with-edit)
@@ -1203,7 +1243,7 @@ Pops up a diff buffer that can be edited to choose the changes to stage."
           (cl-incf count)))
       (message "Staged %d hunks" count)
       (bury-buffer)
-      (unless diff-hl-show-staged-changes
+      (when (not (eq t diff-hl-show-staged-changes))
         (with-current-buffer orig-buffer
           (diff-hl-update))))))
 
@@ -1420,6 +1460,7 @@ CONTEXT-LINES is the size of the unified diff context, defaults to 0."
            (rev
             (if (and (eq backend 'Git)
                      (not diff-hl-reference-revision)
+                     ;; TODO: not sure if any change is needed
                      (not diff-hl-show-staged-changes))
                 (diff-hl-git-index-revision
                  file
